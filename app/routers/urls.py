@@ -10,6 +10,13 @@ from app.services.shortener import (
     increment_clicks,
     build_short_url,
 )
+from app.services.cache import (
+    get_cached_url,
+    set_cached_url,
+    delete_cached_url,
+    increment_clicks_cache,
+    get_cached_clicks,
+)
 
 router = APIRouter(tags=["URLs"])
 
@@ -35,6 +42,9 @@ async def shorten_url(
         expires_at=url_data.expires_at,
     )
     
+    # Cache the URL immediately
+    await set_cached_url(url.short_code, url.original_url)
+    
     return URLResponse(
         short_code=url.short_code,
         short_url=build_short_url(url.short_code),
@@ -51,6 +61,15 @@ async def redirect_to_url(
     short_code: str,
     db: AsyncSession = Depends(get_db),
 ):
+    # Try cache first
+    cached_url = await get_cached_url(short_code)
+    
+    if cached_url:
+        # Increment clicks in Redis (async, non-blocking)
+        await increment_clicks_cache(short_code)
+        return RedirectResponse(url=cached_url, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+    
+    # Cache miss - check database
     url = await get_url_by_code(db, short_code)
     
     if not url:
@@ -71,7 +90,10 @@ async def redirect_to_url(
             detail="URL has expired",
         )
     
-    # Track click
+    # Cache for next time
+    await set_cached_url(short_code, url.original_url)
+    
+    # Track click in database
     await increment_clicks(db, url)
     
     return RedirectResponse(url=url.original_url, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
@@ -89,6 +111,21 @@ async def get_url_stats(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="URL not found",
         )
+    
+    # Get clicks from Redis cache
+    cached_clicks = await get_cached_clicks(short_code)
+    
+    # Return combined clicks (DB + Redis)
+    total_clicks = url.clicks + cached_clicks
+    
+    return URLStats(
+        short_code=url.short_code,
+        original_url=url.original_url,
+        clicks=total_clicks,
+        created_at=url.created_at,
+        expires_at=url.expires_at,
+        is_active=url.is_active,
+    )
     
     return url
 
@@ -108,4 +145,8 @@ async def deactivate_url(
     
     url.is_active = False
     await db.flush()
+    
+    # Remove from cache
+    await delete_cached_url(short_code)
+    
     return None
