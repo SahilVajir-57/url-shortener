@@ -1,0 +1,13 @@
+.git
+.gitignore
+docker-compose.yml
+docker-compose.yaml
+.env
+__pycache__
+*.pyc
+tests/
+test.db
+.pytest_cache
+redis_data/
+postgres_data/
+alembic/
