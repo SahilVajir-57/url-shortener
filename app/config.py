@@ -4,7 +4,7 @@ from functools import lru_cache
 
 class Settings(BaseSettings):
     database_url: str
-    redis_url: str
+    redis_url: str | None = None
     base_url: str = "http://localhost:8000"
 
     class Config:

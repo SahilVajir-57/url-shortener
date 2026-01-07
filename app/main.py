@@ -12,6 +12,9 @@ app = FastAPI(
 
 app.include_router(urls.router)
 
+@app.get("/")
+async def root():
+    return {"message": "URL Shortener API", "status": "running"}
 
 @app.get("/health")
 async def health_check():
