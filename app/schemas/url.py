@@ -33,3 +33,21 @@ class URLStats(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class DailyClicks(BaseModel):
+    date: str
+    clicks: int
+
+
+class ReferrerStats(BaseModel):
+    referrer: str
+    count: int
+
+
+class URLAnalytics(BaseModel):
+    short_code: str
+    original_url: str
+    total_clicks: int
+    daily_clicks: list[DailyClicks]
+    top_referrers: list[ReferrerStats]

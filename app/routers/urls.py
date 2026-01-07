@@ -1,13 +1,12 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime, timezone
 from app.database import get_db
-from app.schemas.url import URLCreate, URLResponse, URLStats
+from app.schemas.url import URLCreate, URLResponse, URLStats, URLAnalytics
 from app.services.shortener import (
     create_short_url,
     get_url_by_code,
-    increment_clicks,
     build_short_url,
 )
 from app.services.cache import (
@@ -17,6 +16,8 @@ from app.services.cache import (
     increment_clicks_cache,
     get_cached_clicks,
 )
+from app.services.rate_limiter import rate_limit_shorten, rate_limit_by_ip
+from app.services.analytics import record_click, get_click_analytics
 
 router = APIRouter(tags=["URLs"])
 
@@ -24,8 +25,12 @@ router = APIRouter(tags=["URLs"])
 @router.post("/shorten", response_model=URLResponse, status_code=status.HTTP_201_CREATED)
 async def shorten_url(
     url_data: URLCreate,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
+    # Rate limit: 5 URLs per minute
+    await rate_limit_shorten(request)
+    
     # Check if custom code already exists
     if url_data.custom_code:
         existing = await get_url_by_code(db, url_data.custom_code)
@@ -59,14 +64,24 @@ async def shorten_url(
 @router.get("/{short_code}")
 async def redirect_to_url(
     short_code: str,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    # Try cache first
+    # Rate limit: 10 requests per minute
+    await rate_limit_by_ip(request)
+    
+    # Try cache first (fast path)
     cached_url = await get_cached_url(short_code)
     
     if cached_url:
-        # Increment clicks in Redis (async, non-blocking)
+        # Increment clicks in Redis
         await increment_clicks_cache(short_code)
+        
+        # Record detailed analytics (get url_id from db)
+        url = await get_url_by_code(db, short_code)
+        if url:
+            await record_click(db, url.id, request)
+        
         return RedirectResponse(url=cached_url, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
     
     # Cache miss - check database
@@ -93,8 +108,11 @@ async def redirect_to_url(
     # Cache for next time
     await set_cached_url(short_code, url.original_url)
     
-    # Track click in database
-    await increment_clicks(db, url)
+    # Record detailed analytics
+    await record_click(db, url.id, request)
+    
+    # Increment clicks in Redis
+    await increment_clicks_cache(short_code)
     
     return RedirectResponse(url=url.original_url, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
 
@@ -126,8 +144,31 @@ async def get_url_stats(
         expires_at=url.expires_at,
         is_active=url.is_active,
     )
+
+
+@router.get("/{short_code}/analytics", response_model=URLAnalytics)
+async def get_url_analytics(
+    short_code: str,
+    days: int = 7,
+    db: AsyncSession = Depends(get_db),
+):
+    url = await get_url_by_code(db, short_code)
     
-    return url
+    if not url:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="URL not found",
+        )
+    
+    analytics = await get_click_analytics(db, url.id, days)
+    
+    return URLAnalytics(
+        short_code=url.short_code,
+        original_url=url.original_url,
+        total_clicks=analytics["total_clicks"],
+        daily_clicks=analytics["daily_clicks"],
+        top_referrers=analytics["top_referrers"],
+    )
 
 
 @router.delete("/{short_code}", status_code=status.HTTP_204_NO_CONTENT)
